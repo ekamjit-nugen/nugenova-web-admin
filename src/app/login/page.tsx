@@ -12,9 +12,11 @@ import { setToken, isSuperAdmin } from '@/lib/auth';
  */
 export default function LoginPage() {
   const router = useRouter();
-  const [phase, setPhase] = useState<'email' | 'otp'>('email');
+  const [phase, setPhase] = useState<'email' | 'otp' | 'mfa'>('email');
   const [email, setEmail] = useState('');
   const [otp, setOtp] = useState('');
+  const [challenge, setChallenge] = useState('');
+  const [mfaCode, setMfaCode] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -40,15 +42,51 @@ export default function LoginPage() {
     setError('');
     setLoading(true);
     try {
-      const res = await apiFetch<{ accessToken?: string; route?: string }>(
-        '/auth/verify-otp',
-        { method: 'POST', body: JSON.stringify({ email, otp }) },
+      const res = await apiFetch<{
+        accessToken?: string;
+        route?: string;
+        mfaRequired?: boolean;
+        mfaChallengeToken?: string;
+      }>('/auth/verify-otp', {
+        method: 'POST',
+        body: JSON.stringify({ email, otp }),
+      });
+      if (res?.mfaRequired && res?.mfaChallengeToken) {
+        // TOTP second factor — hand off to the MFA step.
+        setChallenge(res.mfaChallengeToken);
+        setPhase('mfa');
+      } else if (res?.accessToken) {
+        setToken(res.accessToken);
+        // The backend returns the canonical app route (e.g. /platform), but this
+        // thin admin frontend only ships /admin/playbooks + /dashboard so far —
+        // map super admins to the playbooks console, everyone else to the
+        // dashboard. Richer routes light up as later modules land.
+        router.push(isSuperAdmin() ? '/admin/playbooks' : '/dashboard');
+      } else {
+        setError('Unexpected response from server.');
+      }
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleMfa(e: FormEvent) {
+    e.preventDefault();
+    setError('');
+    setLoading(true);
+    try {
+      const res = await apiFetch<{ accessToken?: string }>(
+        '/auth/mfa/authenticate',
+        {
+          method: 'POST',
+          body: JSON.stringify({ mfaChallengeToken: challenge, code: mfaCode }),
+        },
       );
       if (res?.accessToken) {
         setToken(res.accessToken);
-        router.push(
-          res.route || (isSuperAdmin() ? '/admin/playbooks' : '/dashboard'),
-        );
+        router.push(isSuperAdmin() ? '/admin/playbooks' : '/dashboard');
       } else {
         setError('Unexpected response from server.');
       }
@@ -66,7 +104,9 @@ export default function LoginPage() {
         <p className="sub">
           {phase === 'email'
             ? 'Enter your email — we’ll send you a one-time code.'
-            : `Enter the 6-digit code sent to ${email}.`}
+            : phase === 'otp'
+              ? `Enter the 6-digit code sent to ${email}.`
+              : 'Enter the code from your authenticator app.'}
         </p>
 
         {phase === 'email' ? (
@@ -85,7 +125,7 @@ export default function LoginPage() {
               {loading ? 'Sending…' : 'Send code'}
             </button>
           </form>
-        ) : (
+        ) : phase === 'otp' ? (
           <form onSubmit={handleVerifyOtp}>
             <label htmlFor="otp">One-time code</label>
             <input
@@ -105,6 +145,28 @@ export default function LoginPage() {
             <p className="hint">
               <a href="#" onClick={(e) => { e.preventDefault(); setPhase('email'); setOtp(''); }}>
                 ← Use a different email
+              </a>
+            </p>
+          </form>
+        ) : (
+          <form onSubmit={handleMfa}>
+            <label htmlFor="mfa">Authenticator code</label>
+            <input
+              id="mfa"
+              inputMode="numeric"
+              maxLength={8}
+              value={mfaCode}
+              onChange={(e) => setMfaCode(e.target.value.replace(/\s/g, ''))}
+              placeholder="123456"
+              required
+              autoFocus
+            />
+            <button type="submit" disabled={loading}>
+              {loading ? 'Verifying…' : 'Verify & sign in'}
+            </button>
+            <p className="hint">
+              <a href="#" onClick={(e) => { e.preventDefault(); setPhase('email'); setOtp(''); setMfaCode(''); setChallenge(''); }}>
+                ← Start over
               </a>
             </p>
           </form>
